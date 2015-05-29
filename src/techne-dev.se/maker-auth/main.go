@@ -3,7 +3,6 @@ package main
 import (
 	"crypto/rand"
 	"crypto/sha1"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -12,7 +11,6 @@ import (
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -24,11 +22,9 @@ const (
 
 	ldapSrv    = "ldap://ldap-server.local:389/"
 	ldapBaseDN = "dc=techne-dev,dc=se"
-	ouUsers    = "ou=Users"
-	ouGroups   = "ou=Groups"
 
-	ldapBind = "cn=root,dc=techne-dev,dc=se"
-	ldapPwd  = "kalle"
+	ldapRootDN  = "cn=root,dc=techne-dev,dc=se"
+	ldapRootPwd = "kalle"
 )
 
 type WebserviceHandler struct {
@@ -40,7 +36,6 @@ type LDAPHandler struct {
 }
 
 func main() {
-
 	handler := new(WebserviceHandler)
 	handler.ldap = new(LDAPHandler)
 
@@ -91,10 +86,10 @@ type User struct {
 	GID       int64  `json:"gid"`
 }
 
-func (handler *WebserviceHandler) listUsers(res http.ResponseWriter, req *http.Request) {
+func (self *WebserviceHandler) listUsers(res http.ResponseWriter, req *http.Request) {
 	log.Println("List users")
 
-	_users, err := handler.ldap.listUsers()
+	_users, err := self.ldap.listUsers()
 	if err != nil {
 		http.Error(res, err.Error(), http.StatusInternalServerError)
 		return
@@ -116,7 +111,7 @@ func (handler *WebserviceHandler) listUsers(res http.ResponseWriter, req *http.R
 	}
 }
 
-func (handler *WebserviceHandler) createUser(res http.ResponseWriter, req *http.Request) {
+func (self *WebserviceHandler) createUser(res http.ResponseWriter, req *http.Request) {
 	log.Println("Create user")
 
 	body, err := ioutil.ReadAll(req.Body)
@@ -154,7 +149,7 @@ func (handler *WebserviceHandler) createUser(res http.ResponseWriter, req *http.
 		Username:  params.Username,
 	}
 
-	if err := handler.ldap.createNewUser(&user, params.Password); err != nil {
+	if err := self.ldap.createNewUser(&user, params.Password); err != nil {
 		http.Error(res, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -164,13 +159,13 @@ func (handler *WebserviceHandler) createUser(res http.ResponseWriter, req *http.
 	}
 }
 
-func (handler *WebserviceHandler) getUser(res http.ResponseWriter, req *http.Request) {
+func (self *WebserviceHandler) getUser(res http.ResponseWriter, req *http.Request) {
 	vars := mux.Vars(req)
 	username := vars["username"]
 
 	log.Printf("Get user: %s\n", username)
 
-	user, err := handler.ldap.getUser(username)
+	user, err := self.ldap.getUser(username)
 	if err != nil {
 		http.Error(res, err.Error(), http.StatusInternalServerError)
 		return
@@ -181,7 +176,7 @@ func (handler *WebserviceHandler) getUser(res http.ResponseWriter, req *http.Req
 	}
 }
 
-func (handler *WebserviceHandler) updateUser(res http.ResponseWriter, req *http.Request) {
+func (self *WebserviceHandler) updateUser(res http.ResponseWriter, req *http.Request) {
 	vars := mux.Vars(req)
 	username := vars["username"]
 
@@ -192,88 +187,89 @@ func (handler *WebserviceHandler) updateUser(res http.ResponseWriter, req *http.
 	}
 }
 
-func (handler *WebserviceHandler) authenticate(res http.ResponseWriter, req *http.Request) {
+func (self *WebserviceHandler) authenticate(res http.ResponseWriter, req *http.Request) {
 	body, err := ioutil.ReadAll(req.Body)
 	if err != nil {
 		http.Error(res, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	//  Parse input
 	type Params struct {
 		Username, Password string
 	}
 
 	params := Params{}
 
-	err = json.Unmarshal(body, &params)
-	if err != nil {
+	if err := json.Unmarshal(body, &params); err != nil {
 		http.Error(res, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	// Validate input
 	if params.Username == "" || params.Password == "" {
 		http.Error(res, "Input error", http.StatusInternalServerError)
 		return
 	}
-	if !handler.ldap.authenticateUser(params.Username, params.Password) {
+
+	// Authenticate
+	if self.ldap.authenticateUser(params.Username, params.Password) {
+		res.WriteHeader(http.StatusOK)
+		return
+	} else {
 		// Password is invalid
 		res.WriteHeader(http.StatusForbidden)
 		return
-	}
-
-	// Password is valid
-	if err := json.NewEncoder(res).Encode(Response{"OK", 0}); err != nil {
-		http.Error(res, err.Error(), http.StatusInternalServerError)
 	}
 }
 
 //
 //  LDAP stuff
 //
-func (handler *LDAPHandler) connect() error {
+func (self *LDAPHandler) connect() error {
 	var err error
-	handler.ldap, err = openldap.Initialize(ldapSrv)
+	self.ldap, err = openldap.Initialize(ldapSrv)
 	if err != nil {
 		log.Println(err)
 		return err
 	}
 
-	handler.ldap.SetOption(openldap.LDAP_OPT_PROTOCOL_VERSION, openldap.LDAP_VERSION3)
+	self.ldap.SetOption(openldap.LDAP_OPT_PROTOCOL_VERSION, openldap.LDAP_VERSION3)
 
 	return nil
 }
 
-func (handler *LDAPHandler) close() {
-	handler.ldap.Close()
+func (self *LDAPHandler) close() {
+	self.ldap.Close()
 }
 
-func (handler *LDAPHandler) getUsersDN() string {
+func (self *LDAPHandler) getUsersDN() string {
 	return fmt.Sprintf("ou=Users,%s", ldapBaseDN)
 }
 
-func (handler *LDAPHandler) getGroupsDN() string {
-	return fmt.Sprintf("ou=Users,%s", ldapBaseDN)
+func (self *LDAPHandler) getGroupsDN() string {
+	return fmt.Sprintf("ou=Groups,%s", ldapBaseDN)
 }
 
-func (handler *LDAPHandler) getUIDNextDN() string {
+func (self *LDAPHandler) getUIDNextDN() string {
 	return fmt.Sprintf("cn=uidNext,%s", ldapBaseDN)
 }
 
 //
 //  User handling
 //
-func (ldap *LDAPHandler) listUsers() ([]User, error) {
+func (self *LDAPHandler) listUsers() ([]User, error) {
 	var err error
 
-	if err = ldap.connect(); err != nil {
+	if err = self.connect(); err != nil {
 		return nil, err
 	}
 
-	defer ldap.close()
+	defer self.close()
 
 	var ldapRes *openldap.LdapSearchResult
-	ldapRes, err = ldap.ldap.SearchAll(
-		ldap.getUsersDN(),
+	ldapRes, err = self.ldap.SearchAll(
+		self.getUsersDN(),
 		openldap.LDAP_SCOPE_SUBTREE,
 		"objectClass=posixAccount",
 		[]string{"uid", "cn", "uidnumber", "gidnumber"})
@@ -364,7 +360,7 @@ func (self *LDAPHandler) createNewUser(user *User, password string) error {
 
 	defer self.close()
 
-	if err := self.ldap.Bind(ldapBind, ldapPwd); err != nil {
+	if err := self.ldap.Bind(ldapRootDN, ldapRootPwd); err != nil {
 		return err
 	}
 
@@ -434,37 +430,13 @@ func (self *LDAPHandler) authenticateUser(username, password string) bool {
 
 	defer self.close()
 
-	/*
-		dn := fmt.Sprintf("uid=%s,%s", username, self.getUsersDN())
-		if err := self.ldap.Bind(dn, password); err == nil {
-			return true
-		}
-
-		return false
-	*/
-
-	var ldapRes *openldap.LdapSearchResult
-	ldapRes, err = self.ldap.SearchAll(
-		self.getUsersDN(),
-		openldap.LDAP_SCOPE_SUBTREE,
-		fmt.Sprintf("(&(objectClass=posixAccount)(uid=%s))", username),
-		[]string{"userPassword"})
-	if err != nil {
-		return false
+	// TODO: Validate input
+	dn := fmt.Sprintf("uid=%s,%s", username, self.getUsersDN())
+	if err := self.ldap.Bind(dn, password); err == nil {
+		return true
 	}
 
-	if ldapRes.Count() != 1 {
-		return false
-	}
-
-	ldapEntry := ldapRes.Entries()[0]
-
-	ssha, err := ldapEntry.GetOneValueByName("userPassword")
-	if err != nil {
-		return false
-	}
-
-	return validatePassword(password, ssha)
+	return false
 }
 
 func (self *LDAPHandler) disableUser(username string) error {
@@ -492,6 +464,8 @@ func (self *LDAPHandler) isGroupAvailable(groupname string) bool {
 
 	defer self.close()
 
+	// TODO: Validate input
+
 	ldapRes, err := self.ldap.SearchAll(
 		self.getGroupsDN(),
 		openldap.LDAP_SCOPE_SUBTREE,
@@ -511,7 +485,7 @@ func (self *LDAPHandler) getNextUID() (uint64, error) {
 
 	defer self.close()
 
-	if err := self.ldap.Bind(ldapBind, ldapPwd); err != nil {
+	if err := self.ldap.Bind(ldapRootDN, ldapRootPwd); err != nil {
 		return 0, err
 	}
 
@@ -587,20 +561,6 @@ func (self *LDAPHandler) _incrementNextUID(ldap *openldap.Ldap, currentUID uint6
 //
 //  Passwords
 //
-func validatePassword(password, hashWithPrefix string) bool {
-	hash_b64 := strings.TrimLeft(hashWithPrefix, "{SSHA}")
-	hash, _ := base64.StdEncoding.DecodeString(hash_b64)
-
-	bytes := []byte(hash)
-
-	digest := bytes[:20]
-	salt := bytes[20:]
-
-	new_hash := generateHash(password, salt)
-
-	return subtle.ConstantTimeCompare(digest, new_hash) == 1
-}
-
 func generatePassword(password string, salt []byte) string {
 	if salt == nil {
 		salt = make([]byte, 4)
